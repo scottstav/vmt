@@ -155,7 +155,7 @@ class SSHClient:
 
     # ── readiness polling ─────────────────────────────────────────────
 
-    def wait_until_ready(self, timeout: int = 120, interval: int = 2) -> None:
+    def wait_until_ready(self, timeout: int = 300, interval: int = 2) -> None:
         """Poll connect() until the VM accepts SSH or timeout is reached.
 
         Args:

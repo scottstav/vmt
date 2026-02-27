@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -34,6 +35,59 @@ def _vm_dir(name: str) -> Path:
     d = Path.home() / ".cache" / "vmt" / "vms" / name
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# ---------------------------------------------------------------------------
+# QEMU access (ACL helpers)
+# ---------------------------------------------------------------------------
+
+_QEMU_USER = "libvirt-qemu"
+
+
+def _grant_qemu_access(path: Path) -> None:
+    """Ensure the libvirt-qemu user can reach *path* through every ancestor.
+
+    Uses POSIX ACLs (``setfacl``) to grant the QEMU process user execute
+    permission on each directory component that is otherwise too restrictive,
+    and read+execute on the final directory itself (so QEMU can open files
+    inside it).
+
+    This is necessary when connecting via ``qemu:///system`` because the QEMU
+    process runs as the ``libvirt-qemu`` user, which typically cannot traverse
+    a user's home directory (mode 700).
+
+    Only directories that lack "other-execute" permission get an ACL entry,
+    so we don't touch directories that are already world-traversable.
+    """
+    path = path.resolve()
+
+    # Walk from root down to *path*, granting execute on each ancestor
+    parts: list[Path] = list(reversed(list(path.parents)))  # [/, /home, ...]
+    parts.append(path)  # include the target itself
+
+    for p in parts:
+        if not p.is_dir():
+            continue
+        st = p.stat()
+        # Check if "other" already has execute permission
+        if st.st_mode & 0o001:
+            continue
+        # Grant user ACL: execute only (for traversal) on ancestors,
+        # read+execute on the target itself so QEMU can list files
+        perm = "rx" if p == path else "x"
+        try:
+            subprocess.run(
+                ["setfacl", "-m", f"u:{_QEMU_USER}:{perm}", str(p)],
+                check=True,
+                capture_output=True,
+            )
+            log.debug("Granted %s ACL u:%s:%s on %s", perm, _QEMU_USER, perm, p)
+        except subprocess.CalledProcessError as exc:
+            log.warning(
+                "setfacl failed on %s: %s (QEMU may not be able to access VM files)",
+                p,
+                exc.stderr.decode().strip(),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -135,10 +189,11 @@ class VMManager:
         2. Download cloud image (skip if cached)
         3. Create copy-on-write overlay disk
         4. Generate cloud-init ISO
-        5. Define and start libvirt domain
-        6. Wait for IP via DHCP leases
-        7. Wait for SSH
-        8. Return info dict
+        5. Grant QEMU user access to VM files via POSIX ACLs
+        6. Define and start libvirt domain
+        7. Wait for IP via DHCP leases
+        8. Wait for SSH
+        9. Return info dict
 
         Returns:
             dict with keys: name, domain, ip, ssh_user, ssh_port, spice_port
@@ -178,7 +233,11 @@ class VMManager:
         ci_iso = workdir / "seed.iso"
         create_cloud_init_iso(user_data, meta_data, ci_iso)
 
-        # 5. Define and start domain
+        # 5. Grant QEMU user access to VM files via ACLs
+        _grant_qemu_access(_IMAGES_DIR)
+        _grant_qemu_access(workdir)
+
+        # 6. Define and start domain
         domain_name = f"vmt-{vm_name}"
         self._cleanup_existing_domain(domain_name)
 
@@ -193,17 +252,17 @@ class VMManager:
         dom.create()
         log.info("Domain %s started", domain_name)
 
-        # 6. Wait for IP
+        # 7. Wait for IP
         ip = self._wait_for_ip(dom)
         log.info("VM %s got IP: %s", vm_name, ip)
 
-        # 7. Wait for SSH
+        # 8. Wait for SSH
         ssh = SSHClient(host=ip, user=ssh_user, port=ssh_port)
         ssh.wait_until_ready()
         ssh.close()
         log.info("SSH ready on %s", ip)
 
-        # 8. Return info
+        # 9. Return info
         spice_port = self._get_spice_port(dom)
         return {
             "name": vm_name,
@@ -239,10 +298,25 @@ class VMManager:
 
         ip = self._get_ip(dom)
         spice_port = self._get_spice_port(dom)
+
+        # Load manifest to get SSH user/port
+        ssh_user = "root"
+        ssh_port = 22
+        try:
+            manifest_path = find_manifest(name, self.manifest_dirs)
+            manifest = load_vm_manifest(manifest_path)
+            ssh_cfg = manifest.get("ssh", {})
+            ssh_user = ssh_cfg.get("user", "root")
+            ssh_port = ssh_cfg.get("port", 22)
+        except (FileNotFoundError, KeyError):
+            pass
+
         return {
             "name": name,
             "domain": domain_name,
             "ip": ip,
+            "ssh_user": ssh_user,
+            "ssh_port": ssh_port,
             "spice_port": spice_port,
         }
 

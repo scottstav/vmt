@@ -67,17 +67,19 @@ def cmd_ssh(args: argparse.Namespace) -> None:
 
         ip = info["ip"]
         ssh_user = info.get("ssh_user", "root")
+        ssh_port = info.get("ssh_port", 22)
 
         if not args.cmd:
             # Interactive SSH — replace process
             os.execvp("ssh", [
                 "ssh",
                 "-o", "StrictHostKeyChecking=no",
+                "-p", str(ssh_port),
                 f"{ssh_user}@{ip}",
             ])
         else:
             # Non-interactive — run command via SSHClient
-            client = SSHClient(host=ip, user=ssh_user)
+            client = SSHClient(host=ip, user=ssh_user, port=ssh_port)
             try:
                 result = client.run(" ".join(args.cmd))
                 if result.stdout:

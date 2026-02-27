@@ -7,6 +7,7 @@ disk = 10
 
 [provision]
 packages = [
+    "openssh",
     "sway", "foot", "grim", "slurp",
     "pipewire", "wireplumber", "pipewire-pulse",
     "socat", "git", "base-devel",

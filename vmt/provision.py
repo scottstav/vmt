@@ -14,7 +14,7 @@ def generate_user_data(manifest: dict, ssh_pubkey: str) -> str:
 
     Creates a cloud-config that sets up:
     - A user account with SSH key and passwordless sudo
-    - Package installation
+    - Package installation (if network available)
     - A Wayland compositor as a systemd user service
     - PipeWire audio and the compositor started via runcmd
     """
@@ -43,6 +43,12 @@ def generate_user_data(manifest: dict, ssh_pubkey: str) -> str:
     )
 
     cloud_config: dict = {
+        # bootcmd runs early, before services block on time-sync.
+        # systemd-time-wait-sync blocks the entire boot in VMs without
+        # a working NTP peer, so we mask it to let sshd start promptly.
+        "bootcmd": [
+            "systemctl mask --now systemd-time-wait-sync.service",
+        ],
         "users": [
             {
                 "name": user,
@@ -50,22 +56,32 @@ def generate_user_data(manifest: dict, ssh_pubkey: str) -> str:
                 "sudo": "ALL=(ALL) NOPASSWD:ALL",
                 "groups": ["video", "audio"],
                 "shell": "/bin/bash",
+                "lock_passwd": False,
+                "plain_text_passwd": "vmt",
             },
         ],
+        "ssh_pwauth": True,
         "package_update": True,
         "packages": list(packages),
+        # write_files uses defer: true so the entry is written during the
+        # final stage, after the user has been created.
         "write_files": [
             {
                 "path": f"/home/{user}/.config/systemd/user/test-compositor.service",
                 "owner": f"{user}:{user}",
+                "defer": True,
                 "content": service_content,
             },
         ],
         "runcmd": [
+            # Ensure sshd is running (some cloud images don't enable it)
+            "systemctl enable --now sshd || systemctl enable --now ssh || true",
             f"loginctl enable-linger {user}",
-            f"su - {user} -c 'systemctl --user start pipewire'",
-            f"su - {user} -c 'systemctl --user start wireplumber'",
-            f"su - {user} -c 'systemctl --user start test-compositor'",
+            # Start user services via machinectl which sets up the full
+            # user session environment (XDG_RUNTIME_DIR, DBUS, etc.)
+            f"machinectl shell {user}@ /bin/bash -c "
+            f"'systemctl --user start pipewire wireplumber test-compositor' "
+            "|| true",
         ],
     }
 
