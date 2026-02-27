@@ -1,0 +1,27 @@
+[vm]
+name = "fedora-gnome"
+image = "https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2"
+memory = 3072
+cpus = 2
+disk = 15
+
+[provision]
+packages = [
+    "gnome-shell", "gnome-session", "gnome-screenshot",
+    "gdm",
+    "pipewire", "wireplumber", "pipewire-pulseaudio",
+    "socat", "git", "gcc", "make",
+    "meson", "ninja-build",
+]
+compositor = "gnome"
+compositor_cmd = "gnome-session --session=gnome"
+display_server = "wayland"
+screenshot_tool = "gnome-screenshot --file="
+
+[provision.env]
+XDG_RUNTIME_DIR = "/run/user/1000"
+LIBGL_ALWAYS_SOFTWARE = "1"
+
+[ssh]
+user = "fedora"
+port = 22

@@ -1,0 +1,27 @@
+[vm]
+name = "alpine-weston"
+image = "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.3-x86_64-bios-cloudinit-r0.qcow2"
+memory = 1024
+cpus = 2
+disk = 5
+
+[provision]
+packages = [
+    "weston", "grim",
+    "pipewire", "wireplumber",
+    "socat", "git", "build-base",
+    "meson", "ninja",
+    "cairo-dev", "pango-dev", "json-c-dev",
+    "wayland-dev", "wayland-protocols",
+]
+compositor = "weston"
+compositor_cmd = "weston --backend=drm"
+display_server = "wayland"
+screenshot_tool = "grim"
+
+[provision.env]
+XDG_RUNTIME_DIR = "/run/user/1000"
+
+[ssh]
+user = "alpine"
+port = 22
