@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from vmt.provision import (
+    _is_arch_manifest,
     create_cloud_init_iso,
     generate_meta_data,
     generate_user_data,
@@ -99,7 +100,8 @@ class TestGenerateUserData:
         assert service_file["path"] == "/home/vmtuser/.config/systemd/user/test-compositor.service"
         content = service_file["content"]
         assert "ExecStart=/usr/bin/weston --backend=drm" in content
-        assert 'Environment="WLR_BACKENDS=drm"' in content
+        # Headless service always forces WLR_BACKENDS=headless for grim
+        assert 'Environment="WLR_BACKENDS=headless"' in content
         assert 'Environment="XDG_RUNTIME_DIR=/run/user/1000"' in content
 
     def test_runcmd_enable_linger(self, manifest, ssh_key):
@@ -122,6 +124,90 @@ class TestGenerateUserData:
         runcmd = data["runcmd"]
         runcmd_str = str(runcmd)
         assert "test-compositor" in runcmd_str
+
+    def test_chpasswd_no_expire(self, manifest, ssh_key):
+        result = generate_user_data(manifest, ssh_key)
+        data = yaml.safe_load(result.split("\n", 1)[1])
+        assert data["chpasswd"] == {"expire": False}
+
+    def test_user_password_fields(self, manifest, ssh_key):
+        result = generate_user_data(manifest, ssh_key)
+        data = yaml.safe_load(result.split("\n", 1)[1])
+        user = next(u for u in data["users"] if isinstance(u, dict))
+        assert user["lock_passwd"] is False
+        assert user["plain_text_passwd"] == "vmt"
+
+    def test_local_bin_in_path(self, manifest, ssh_key):
+        result = generate_user_data(manifest, ssh_key)
+        data = yaml.safe_load(result.split("\n", 1)[1])
+        bashrc_file = next(
+            f for f in data["write_files"]
+            if f["path"].endswith(".bashrc")
+        )
+        assert '$HOME/.local/bin' in bashrc_file["content"]
+        assert "PATH" in bashrc_file["content"]
+
+    def test_autologin_conf_in_write_files(self, manifest, ssh_key):
+        result = generate_user_data(manifest, ssh_key)
+        data = yaml.safe_load(result.split("\n", 1)[1])
+        autologin_file = next(
+            f for f in data["write_files"]
+            if "autologin.conf" in f["path"]
+        )
+        assert autologin_file["path"] == "/etc/systemd/system/getty@tty1.service.d/autologin.conf"
+        assert "--autologin vmtuser" in autologin_file["content"]
+
+    def test_bash_profile_compositor_launch(self, manifest, ssh_key):
+        result = generate_user_data(manifest, ssh_key)
+        data = yaml.safe_load(result.split("\n", 1)[1])
+        profile_file = next(
+            f for f in data["write_files"]
+            if f["path"].endswith(".bash_profile")
+        )
+        content = profile_file["content"]
+        assert '$(tty)" = "/dev/tty1"' in content
+        assert "exec /usr/bin/weston --backend=drm" in content
+
+    def test_pacman_key_for_arch_manifest(self, ssh_key):
+        arch_manifest = {
+            "vm": {"image": "https://mirror.archlinux.org/Arch-Linux-x86_64-cloudimg.qcow2"},
+            "ssh": {"user": "arch"},
+            "provision": {
+                "packages": ["sway"],
+                "compositor_cmd": "sway",
+                "env": {},
+            },
+        }
+        result = generate_user_data(arch_manifest, ssh_key)
+        data = yaml.safe_load(result.split("\n", 1)[1])
+        bootcmd_str = str(data["bootcmd"])
+        assert "pacman-key --init" in bootcmd_str
+        assert "pacman-key --populate archlinux" in bootcmd_str
+
+    def test_no_pacman_key_for_non_arch(self, manifest, ssh_key):
+        """Non-Arch manifest should not have pacman-key in bootcmd."""
+        result = generate_user_data(manifest, ssh_key)
+        data = yaml.safe_load(result.split("\n", 1)[1])
+        bootcmd_str = str(data["bootcmd"])
+        assert "pacman-key" not in bootcmd_str
+
+
+# ---------------------------------------------------------------------------
+# _is_arch_manifest
+# ---------------------------------------------------------------------------
+
+
+class TestIsArchManifest:
+    def test_arch_image_url(self):
+        m = {"vm": {"image": "https://mirror.archlinux.org/Arch-Linux.qcow2"}}
+        assert _is_arch_manifest(m) is True
+
+    def test_non_arch_image(self):
+        m = {"vm": {"image": "https://fedora.org/Fedora-Cloud.qcow2"}}
+        assert _is_arch_manifest(m) is False
+
+    def test_no_vm_section(self):
+        assert _is_arch_manifest({}) is False
 
 
 # ---------------------------------------------------------------------------

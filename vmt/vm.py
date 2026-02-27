@@ -208,6 +208,7 @@ class VMManager:
         image_url = vm_cfg["image"]
         memory_mb = vm_cfg["memory"]
         cpus = vm_cfg["cpus"]
+        disk_gb = vm_cfg.get("disk", 10)
         ssh_user = ssh_cfg["user"]
         ssh_port = ssh_cfg.get("port", 22)
 
@@ -221,10 +222,15 @@ class VMManager:
         else:
             log.info("Using cached image: %s", base_image)
 
-        # 3. Create overlay disk
+        # 3. Create overlay disk and resize to manifest spec
         workdir = _vm_dir(vm_name)
         overlay = workdir / "disk.qcow2"
         self._create_overlay_disk(base_image, overlay)
+        subprocess.run(
+            ["qemu-img", "resize", str(overlay), f"{disk_gb}G"],
+            check=True,
+            capture_output=True,
+        )
 
         # 4. Generate cloud-init ISO
         ssh_pubkey = get_ssh_pubkey()
@@ -255,6 +261,12 @@ class VMManager:
         # 7. Wait for IP
         ip = self._wait_for_ip(dom)
         log.info("VM %s got IP: %s", vm_name, ip)
+
+        # 7a. Ensure libvirt default network (NAT masquerade) is active
+        self._ensure_default_network_active()
+
+        # 7b. Fix Docker FORWARD rules if Docker is present
+        self._fix_docker_forward_rules()
 
         # 8. Wait for SSH
         ssh = SSHClient(host=ip, user=ssh_user, port=ssh_port)
@@ -335,6 +347,129 @@ class VMManager:
         snap = dom.snapshotLookupByName(snap_name)
         dom.revertToSnapshot(snap)
         log.info("Reverted %s to snapshot '%s'", domain_name, snap_name)
+
+    # ── networking helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _ensure_default_network_active() -> None:
+        """Check that the libvirt 'default' network is active; start it if not.
+
+        The default network provides NAT masquerade for VMs on virbr0.
+        After reboots the network can be inactive, breaking VM internet access.
+        """
+        try:
+            result = subprocess.run(
+                ["virsh", "--connect", "qemu:///system", "net-info", "default"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                log.warning(
+                    "Could not query libvirt default network: %s",
+                    result.stderr.strip(),
+                )
+                return
+
+            # Parse "Active:          yes" from the output
+            active = False
+            for line in result.stdout.splitlines():
+                if line.strip().lower().startswith("active:"):
+                    active = "yes" in line.lower()
+                    break
+
+            if active:
+                log.debug("Libvirt default network is active")
+                return
+
+            log.info("Libvirt default network is inactive, starting it...")
+            start_result = subprocess.run(
+                ["virsh", "--connect", "qemu:///system", "net-start", "default"],
+                capture_output=True,
+                text=True,
+            )
+            if start_result.returncode == 0:
+                log.info("Started libvirt default network (NAT masquerade)")
+            else:
+                log.warning(
+                    "Failed to start libvirt default network: %s",
+                    start_result.stderr.strip(),
+                )
+        except FileNotFoundError:
+            log.debug("virsh not found, skipping default network check")
+
+    @staticmethod
+    def _fix_docker_forward_rules() -> None:
+        """Add iptables FORWARD rules so Docker doesn't block virbr0 traffic.
+
+        Docker sets the FORWARD chain policy to DROP and uses DOCKER-USER for
+        custom exceptions.  We add rules to allow virbr0 traffic through.
+
+        Tries without sudo first.  On permission errors, logs a warning with
+        the commands the user should run manually.
+        """
+        # Detect Docker: check if DOCKER-USER chain exists
+        try:
+            detect = subprocess.run(
+                ["iptables", "-L", "DOCKER-USER", "-n"],
+                capture_output=True,
+                text=True,
+            )
+            if detect.returncode != 0:
+                log.debug("DOCKER-USER chain not found, Docker not detected")
+                return
+        except FileNotFoundError:
+            log.debug("iptables not found, skipping Docker forward fix")
+            return
+
+        log.info("Docker detected, checking virbr0 forwarding rules...")
+
+        rules = [
+            # Allow outbound from virbr0
+            ["-i", "virbr0", "-j", "ACCEPT"],
+            # Allow return traffic to virbr0
+            ["-o", "virbr0", "-m", "conntrack", "--ctstate",
+             "RELATED,ESTABLISHED", "-j", "ACCEPT"],
+        ]
+
+        commands_needed: list[str] = []
+
+        for rule_args in rules:
+            # Check if rule already exists
+            check = subprocess.run(
+                ["iptables", "-C", "DOCKER-USER"] + rule_args,
+                capture_output=True,
+                text=True,
+            )
+            if check.returncode == 0:
+                log.debug("Rule already exists: %s", " ".join(rule_args))
+                continue
+
+            # Try to insert the rule
+            insert = subprocess.run(
+                ["iptables", "-I", "DOCKER-USER"] + rule_args,
+                capture_output=True,
+                text=True,
+            )
+            if insert.returncode == 0:
+                log.info("Added DOCKER-USER rule: %s", " ".join(rule_args))
+            else:
+                stderr = insert.stderr.strip()
+                if "Permission denied" in stderr or "you must be root" in stderr.lower():
+                    cmd = "iptables -I DOCKER-USER " + " ".join(rule_args)
+                    commands_needed.append(cmd)
+                else:
+                    log.warning(
+                        "Failed to add DOCKER-USER rule (%s): %s",
+                        " ".join(rule_args),
+                        stderr,
+                    )
+
+        if commands_needed:
+            log.warning(
+                "Insufficient permissions to add Docker forwarding rules. "
+                "Run the following as root to allow VM network traffic:\n  %s",
+                "\n  ".join(f"sudo {cmd}" for cmd in commands_needed),
+            )
 
     # ── internal helpers ──────────────────────────────────────────────
 

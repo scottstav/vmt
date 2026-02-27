@@ -9,14 +9,22 @@ from pathlib import Path
 import yaml
 
 
+def _is_arch_manifest(manifest: dict) -> bool:
+    """Return True if the manifest targets Arch Linux."""
+    image = manifest.get("vm", {}).get("image", "")
+    return "arch" in image.lower() or "archlinux" in image.lower()
+
+
 def generate_user_data(manifest: dict, ssh_pubkey: str) -> str:
     """Generate cloud-init user-data YAML from a VM manifest dict.
 
     Creates a cloud-config that sets up:
-    - A user account with SSH key and passwordless sudo
-    - Package installation (if network available)
-    - A Wayland compositor as a systemd user service
-    - PipeWire audio and the compositor started via runcmd
+    - A user account with SSH key, password, and passwordless sudo
+    - Package installation (with pacman-key init for Arch)
+    - A Wayland compositor as a systemd user service (headless mode)
+    - TTY autologin + .bash_profile compositor launch (DRM/SPICE mode)
+    - PipeWire audio started via runcmd
+    - ~/.local/bin on PATH
     """
     user = manifest["ssh"]["user"]
     provision = manifest["provision"]
@@ -24,9 +32,12 @@ def generate_user_data(manifest: dict, ssh_pubkey: str) -> str:
     compositor_cmd = provision["compositor_cmd"]
     env_vars = provision.get("env", {})
 
-    # Build the systemd unit for the compositor
+    # --- Headless systemd service (WLR_BACKENDS=headless for grim) ----------
+    # Build Environment= directives from provision.env, forcing headless
+    headless_env = dict(env_vars)
+    headless_env["WLR_BACKENDS"] = "headless"
     env_lines = "\n".join(
-        f'Environment="{k}={v}"' for k, v in env_vars.items()
+        f'Environment="{k}={v}"' for k, v in headless_env.items()
     )
     service_content = (
         "[Unit]\n"
@@ -42,13 +53,29 @@ def generate_user_data(manifest: dict, ssh_pubkey: str) -> str:
         "WantedBy=default.target\n"
     )
 
+    # --- TTY autologin for SPICE/DRM interactive use ------------------------
+    autologin_content = (
+        "[Service]\n"
+        "ExecStart=\n"
+        f"ExecStart=-/sbin/agetty --autologin {user} --noclear %I $TERM\n"
+    )
+
+    # .bash_profile launches compositor on tty1 (DRM mode)
+    bash_profile_content = (
+        f'[ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ] && exec {compositor_cmd}\n'
+    )
+
+    # --- bootcmd ------------------------------------------------------------
+    bootcmd: list = [
+        "systemctl mask --now systemd-time-wait-sync.service",
+    ]
+    # Arch cloud images have empty keyrings; init them before package install
+    if _is_arch_manifest(manifest):
+        bootcmd.append("pacman-key --init && pacman-key --populate archlinux")
+
     cloud_config: dict = {
         # bootcmd runs early, before services block on time-sync.
-        # systemd-time-wait-sync blocks the entire boot in VMs without
-        # a working NTP peer, so we mask it to let sshd start promptly.
-        "bootcmd": [
-            "systemctl mask --now systemd-time-wait-sync.service",
-        ],
+        "bootcmd": bootcmd,
         "users": [
             {
                 "name": user,
@@ -60,10 +87,11 @@ def generate_user_data(manifest: dict, ssh_pubkey: str) -> str:
                 "plain_text_passwd": "vmt",
             },
         ],
+        "chpasswd": {"expire": False},
         "ssh_pwauth": True,
         "package_update": True,
         "packages": list(packages),
-        # write_files uses defer: true so the entry is written during the
+        # write_files uses defer: true so entries are written during the
         # final stage, after the user has been created.
         "write_files": [
             {
@@ -71,6 +99,23 @@ def generate_user_data(manifest: dict, ssh_pubkey: str) -> str:
                 "owner": f"{user}:{user}",
                 "defer": True,
                 "content": service_content,
+            },
+            {
+                "path": "/etc/systemd/system/getty@tty1.service.d/autologin.conf",
+                "content": autologin_content,
+            },
+            {
+                "path": f"/home/{user}/.bash_profile",
+                "owner": f"{user}:{user}",
+                "defer": True,
+                "content": bash_profile_content,
+            },
+            {
+                "path": f"/home/{user}/.bashrc",
+                "owner": f"{user}:{user}",
+                "defer": True,
+                "append": True,
+                "content": 'export PATH="$HOME/.local/bin:$PATH"\n',
             },
         ],
         "runcmd": [
