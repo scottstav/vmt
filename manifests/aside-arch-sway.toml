@@ -1,0 +1,27 @@
+[vm]
+name = "aside-arch-sway"
+image = "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
+memory = 4096
+cpus = 2
+disk = 15
+
+[provision]
+packages = [
+    "openssh",
+    "sway", "foot", "grim",
+    "pipewire", "wireplumber", "pipewire-pulse",
+    "socat", "git", "base-devel",
+]
+compositor = "sway"
+compositor_cmd = "sway"
+display_server = "wayland"
+screenshot_tool = "grim"
+
+[provision.env]
+XDG_RUNTIME_DIR = "/run/user/1000"
+WLR_RENDERER = "pixman"
+WLR_LIBINPUT_NO_DEVICES = "1"
+
+[ssh]
+user = "arch"
+port = 22

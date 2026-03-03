@@ -1,0 +1,32 @@
+[vm]
+name = "aside-fedora-kde"
+image = "https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2"
+memory = 4096
+cpus = 2
+disk = 20
+
+[provision]
+packages = [
+    "plasma-desktop", "plasma-workspace", "sddm", "kwin-wayland",
+    "konsole", "grim",
+    "pipewire", "wireplumber", "pipewire-pulseaudio",
+    "socat", "git",
+    "gcc", "make", "meson", "ninja-build",
+    "cairo-devel", "pango-devel", "json-c-devel",
+    "wayland-devel", "wayland-protocols-devel",
+    "python3-pip", "python3-devel",
+    "gtk4-devel", "libadwaita-devel", "gtk4-layer-shell-devel",
+    "gobject-introspection-devel", "python3-gobject", "python3-cairo",
+    "pipewire-utils", "python3-numpy", "portaudio",
+]
+compositor = "kwin"
+compositor_cmd = "startplasma-wayland"
+display_server = "wayland"
+screenshot_tool = "grim"
+
+[provision.env]
+XDG_RUNTIME_DIR = "/run/user/1000"
+
+[ssh]
+user = "fedora"
+port = 22
