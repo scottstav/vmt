@@ -59,6 +59,57 @@ class TestGetSSHKeyPath:
             with pytest.raises(FileNotFoundError):
                 get_ssh_key_path()
 
+    def test_vmt_data_dir_key_wins_over_ssh_dir(self, tmp_path: Path):
+        """~/.local/share/vmt/id_ed25519 is preferred over ~/.ssh keys."""
+        data_dir = tmp_path / ".local" / "share" / "vmt"
+        data_dir.mkdir(parents=True)
+        (data_dir / "id_ed25519").touch()
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "id_ed25519").touch()
+
+        with patch("vmt.connect.Path.home", return_value=tmp_path):
+            result = get_ssh_key_path()
+
+        assert result == data_dir / "id_ed25519"
+
+    def test_vmt_suffixed_key_wins_over_generic(self, tmp_path: Path):
+        """~/.ssh/id_ed25519_vmt is preferred over ~/.ssh/id_ed25519."""
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "id_ed25519_vmt").touch()
+        (ssh_dir / "id_ed25519").touch()
+
+        with patch("vmt.connect.Path.home", return_value=tmp_path):
+            result = get_ssh_key_path()
+
+        assert result == ssh_dir / "id_ed25519_vmt"
+
+    def test_env_override_wins(self, tmp_path: Path, monkeypatch):
+        """$VMT_SSH_KEY beats every discovered location."""
+        custom = tmp_path / "custom_key"
+        custom.touch()
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "id_ed25519").touch()
+        monkeypatch.setenv("VMT_SSH_KEY", str(custom))
+
+        with patch("vmt.connect.Path.home", return_value=tmp_path):
+            result = get_ssh_key_path()
+
+        assert result == custom
+
+    def test_env_override_missing_file_raises(self, tmp_path: Path, monkeypatch):
+        """$VMT_SSH_KEY pointing at a missing file fails loudly, no fallback."""
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "id_ed25519").touch()
+        monkeypatch.setenv("VMT_SSH_KEY", str(tmp_path / "nope"))
+
+        with patch("vmt.connect.Path.home", return_value=tmp_path):
+            with pytest.raises(FileNotFoundError):
+                get_ssh_key_path()
+
 
 # ── get_ssh_pubkey ────────────────────────────────────────────────────
 

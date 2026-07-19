@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,28 +12,45 @@ import paramiko
 
 # ── Key discovery ─────────────────────────────────────────────────────
 
-_KEY_NAMES = ("id_ed25519", "id_rsa", "id_ecdsa")
+_KEY_NAMES = ("id_ed25519_vmt", "id_ed25519", "id_rsa", "id_ecdsa")
+
+
+def _candidate_key_paths() -> list[Path]:
+    """Candidate private-key locations, highest priority first."""
+    candidates = [Path.home() / ".local" / "share" / "vmt" / "id_ed25519"]
+    ssh_dir = Path.home() / ".ssh"
+    candidates.extend(ssh_dir / name for name in _KEY_NAMES)
+    return candidates
 
 
 def get_ssh_key_path() -> Path:
-    """Find the first available SSH private key in ~/.ssh/.
+    """Find the SSH private key vmt should use.
 
-    Checks for id_ed25519, id_rsa, id_ecdsa in that order.
+    If $VMT_SSH_KEY is set, that path is used and must exist. Otherwise
+    checks, in order: ~/.local/share/vmt/id_ed25519 (vmt's own key
+    location), then ~/.ssh/{id_ed25519_vmt,id_ed25519,id_rsa,id_ecdsa}.
 
     Returns:
         Path to the private key file.
 
     Raises:
-        FileNotFoundError: If no supported key is found.
+        FileNotFoundError: If no supported key is found, or $VMT_SSH_KEY
+            points at a missing file.
     """
-    ssh_dir = Path.home() / ".ssh"
-    for name in _KEY_NAMES:
-        key = ssh_dir / name
+    env = os.environ.get("VMT_SSH_KEY")
+    if env:
+        key = Path(env).expanduser()
+        if not key.exists():
+            raise FileNotFoundError(f"$VMT_SSH_KEY points at missing file: {key}")
+        return key
+    candidates = _candidate_key_paths()
+    for key in candidates:
         if key.exists():
             return key
     raise FileNotFoundError(
-        f"No SSH private key found in {ssh_dir} "
-        f"(checked {', '.join(_KEY_NAMES)})"
+        "No SSH private key found (checked "
+        + ", ".join(str(c) for c in candidates)
+        + "); set $VMT_SSH_KEY to use a specific key"
     )
 
 
